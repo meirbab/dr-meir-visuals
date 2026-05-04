@@ -103,6 +103,12 @@ Image proportion: ~60% width on desktop, stacks on mobile via `flex-wrap`. Image
 
 ### 5. Path B — Apify scrape + nano-banana edit
 
+**Search-language priority (validated 2026-05-04):**
+
+1. **English first** — `#kneeliposuction`, `#kneecontouring`, `#bbl`, `#liposuction` give the most results (30-50+ per tag) with the highest visual quality (US plastic surgeons, before/after with consistent style). Use as primary source.
+2. **Spanish second** — `#liposuccionrodillas`, `#cirugiaplastica` — large Spanish-speaking medical Instagram community (Mexico, Spain, Argentina, Colombia).
+3. **Russian last** — narrower hashtag taxonomy, often only 5-15 results per tag and many are off-topic. `#липосакцияколен` returned 5 results, mostly hairdressers.
+
 ```python
 # scripts/apify_instagram.py
 # Run apify/instagram-hashtag-scraper for translated keyword
@@ -303,4 +309,5 @@ Helper scripts re-use `~/.dr-meir/lib/wp_client.py` and `elementor_tree.py` (the
 
 ## Versioning
 
-- v0.1 (2026-05-04): Initial — Path A validated end-to-end. Path B/C scaffolded; ready to run when caller invokes.
+- **v0.2** (2026-05-04, evening): Path B validated end-to-end on post 52464 (knee liposuction). Replaced 3 chin galleries (9 images total) with: 1 transformed Instagram image + 5 nano-banana fresh generations + 4 Higgsfield (`nano_banana_flash`) generations. Lessons added: English-first hashtag priority; nano-banana is faster than Higgsfield for static image generation but Higgsfield gives a fallback when nano-banana 503s under load; heavy AI transformation reliably strips branding/watermarks/text overlays from IG sources. SKILL.md updated.
+- **v0.1** (2026-05-04, morning): Initial — Path A validated end-to-end on post 17924 (abdominal). Path B/C scaffolded; ready to run when caller invokes.
