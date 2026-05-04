@@ -1,0 +1,29 @@
+<!--
+video_embed.html — HTML5 before/after video for medical pages
+
+Template variables:
+  {{MARKER}}        — unique HTML comment marker
+  {{TITLE}}         — Hebrew section title (h3)
+  {{VIDEO_URL}}     — full https URL to mp4 (uploaded to WP media)
+  {{POSTER_URL}}    — still image shown before play (typically the "before" frame)
+  {{CAPTION}}       — figcaption text
+
+Mobile-safe: max-width clamps the video, controls always visible.
+-->
+<!-- {{MARKER}} -->
+<figure style="margin:2em auto;max-width:720px;background:#fafafa;border-radius:14px;padding:24px;box-shadow:0 2px 10px rgba(0,0,0,0.06);text-align:center">
+  <h3 style="text-align:center;margin:0 0 18px 0;font-size:1.4em;color:#222">{{TITLE}}</h3>
+  <video controls
+         preload="metadata"
+         poster="{{POSTER_URL}}"
+         playsinline
+         style="width:100%;height:auto;display:block;border-radius:10px;background:#000"
+         aria-label="{{TITLE}}">
+    <source src="{{VIDEO_URL}}" type="video/mp4">
+    הדפדפן שלך לא תומך בנגן וידאו HTML5.
+    <a href="{{VIDEO_URL}}">הורד את הסרטון</a> כדי לצפות בו.
+  </video>
+  <figcaption style="font-size:0.85em;color:#666;margin-top:14px;font-style:italic">
+    {{CAPTION}}
+  </figcaption>
+</figure>

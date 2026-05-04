@@ -1,0 +1,36 @@
+# Sensitive credentials must NEVER be committed
+credentials.env
+.env
+*.token
+*.key
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and runtime artifacts
+*.log
+*.bak
+*.bak.*
+*.backup
+
+# Generated visual artifacts (re-generated on demand)
+generated_imgs/
+*.tmp.png
+*.tmp.mp4
+plan.json
+candidates.json
+
+# Editor
+.vscode/
+.idea/
+*.swp
