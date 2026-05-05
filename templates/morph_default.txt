@@ -1,0 +1,6 @@
+Slow smooth medical-grade transformation: the body area gradually becomes slimmer and more sculpted over time. Excess fat reduces, cellulite smooths out, contour tightens, skin tone evens out. Pose and camera completely static. Soft clinical studio lighting. The end state shows clearly slimmer, defined, contoured anatomy. Realistic, no over-stylization, no glitching, no morphing artifacts on the background.
+
+Override hints:
+- "fast morph"   -> add: "transformation should happen smoothly across the full duration with a clear final state"
+- "with audio"   -> add: "soft clinical ambience, no music"   (only with models that support audio)
+- "single area"  -> narrow the prompt to "[area name] only", e.g. "knees only — thighs and calves stay identical"

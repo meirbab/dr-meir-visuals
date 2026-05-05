@@ -1,128 +1,191 @@
 #!/usr/bin/env python3
 """
-Search Instagram via Apify for visual inspiration.
+Apify Instagram fetcher — v0.3 (URL mode).
 
-Usage:
-    python3 apify_instagram.py <hashtag_or_keyword> [--limit 30]
+In v0.3 the user supplies one or more Instagram post URLs they curated manually,
+and this script returns a normalized list of {shortcode, image_url, caption,
+owner, likes, location} dicts. Caption strings are returned in full so the
+caller can mine them for content enrichment.
 
-Returns JSON list of candidates:
-    [
-      {
-        "url": "https://...",
-        "image_url": "https://...",
-        "caption": "...",
-        "likes": 1234,
-        "width": 1080, "height": 1080,
-        "owner": "...",
-        "type": "image"
-      },
-      ...
-    ]
+Usage as CLI:
+    python3 apify_instagram.py URL1 URL2 ... \\
+            --out /tmp/dr-meir-visuals/raw.json \\
+            --download-dir /tmp/dr-meir-visuals/raw
 
-Filters out videos, carousels, low-engagement posts, low-res images.
-Drops posts that look like ads / promo (heavy emoji, "купить", "DM", etc.).
+Usage as library:
+    from apify_instagram import fetch_posts, download_images
+    items = fetch_posts(urls)
+    paths = download_images(items, out_dir='/tmp/run/raw')
 
-Reads APIFY_API_TOKEN from ~/.dr-meir/credentials.env.
+The legacy hashtag-scraper helper is kept as `fetch_by_hashtag` for back-compat,
+but it is no longer called by the default v0.3 pipeline.
 """
 import argparse
 import json
-import os
-import re
 import sys
+import urllib.parse
 import urllib.request
+import urllib.error
 from pathlib import Path
 
+CREDS_PATH = Path.home() / '.dr-meir' / 'credentials.env'
 
-def load_creds():
-    creds_path = Path.home() / '.dr-meir' / 'credentials.env'
-    creds = {}
-    for line in creds_path.read_text().splitlines():
+
+def _load_token():
+    if not CREDS_PATH.exists():
+        raise FileNotFoundError(f'Missing {CREDS_PATH}')
+    for line in CREDS_PATH.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith('#') or '=' not in line:
             continue
         k, v = line.split('=', 1)
-        creds[k.strip()] = v.strip().strip('"').strip("'")
-    return creds
+        if k.strip() == 'APIFY_API_TOKEN':
+            return v.strip().strip('"').strip("'")
+    raise ValueError('APIFY_API_TOKEN not in credentials.env')
 
 
-PROMO_RE = re.compile(r'(купить|cкид|sale|promo|акци[яи]|записаться|запись|dm me|whatsapp|☎️|📞)',
-                      re.IGNORECASE)
+def _shortcode_from_url(u: str):
+    try:
+        return u.rstrip('/').split('/p/')[1].split('/')[0]
+    except Exception:
+        return None
 
 
-def looks_promo(caption: str) -> bool:
-    if not caption:
-        return False
-    return bool(PROMO_RE.search(caption))
+def _normalize(it):
+    """Normalize a raw Apify Instagram-scraper item into our schema."""
+    if not isinstance(it, dict):
+        return None
+    image_url = it.get('displayUrl')
+    if not image_url:
+        return None
+    children = it.get('childPosts') or it.get('images') or []
+    child_images = []
+    for c in children:
+        if isinstance(c, dict) and c.get('displayUrl'):
+            child_images.append(c['displayUrl'])
+        elif isinstance(c, str):
+            child_images.append(c)
+    return {
+        'shortcode': it.get('shortCode') or '',
+        'url': it.get('url') or '',
+        'image_url': image_url,
+        'child_images': child_images[:6],
+        'caption': it.get('caption') or '',
+        'owner': it.get('ownerUsername') or '',
+        'likes': it.get('likesCount') or 0,
+        'comments': it.get('commentsCount') or 0,
+        'width': it.get('dimensionsWidth') or 0,
+        'height': it.get('dimensionsHeight') or 0,
+        'location': it.get('locationName') or '',
+        'type': it.get('type') or '',
+    }
 
 
-def run_hashtag_scraper(hashtag: str, results_limit: int = 30, token: str = None):
-    """Run apify/instagram-hashtag-scraper synchronously and return dataset items.
+def fetch_posts(urls, timeout=240):
+    """Fetch Instagram posts via Apify directUrls mode.
 
-    Note: drops the leading '#' if present. The actor expects bare names.
+    Returns a list of normalized items in the SAME order as the input URLs
+    (when a shortcode match is found). Items the API didn't return are skipped.
     """
-    token = token or load_creds()['APIFY_API_TOKEN']
-    hashtag = hashtag.lstrip('#')
-
-    url = f'https://api.apify.com/v2/acts/apify~instagram-hashtag-scraper/run-sync-get-dataset-items?token={token}'
+    token = _load_token()
     payload = json.dumps({
-        'hashtags': [hashtag],
-        'resultsLimit': results_limit,
+        'directUrls': list(urls),
+        'resultsType': 'posts',
+        'resultsLimit': max(50, len(urls) * 5),
+        'addParentData': False,
     }).encode('utf-8')
+    api = (
+        'https://api.apify.com/v2/acts/'
+        f'apify~instagram-scraper/run-sync-get-dataset-items?token={token}'
+    )
+    req = urllib.request.Request(
+        api, data=payload, method='POST',
+        headers={'Content-Type': 'application/json'},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        raw = json.loads(r.read())
+    items = [n for n in (_normalize(it) for it in raw) if n is not None]
+    by_short = {it['shortcode']: it for it in items}
+    ordered = []
+    for u in urls:
+        sc = _shortcode_from_url(u)
+        if sc and sc in by_short:
+            ordered.append(by_short.pop(sc))
+    ordered.extend(by_short.values())
+    return ordered
 
-    req = urllib.request.Request(url, data=payload, method='POST', headers={
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-    })
-    with urllib.request.urlopen(req, timeout=240) as r:
-        items = json.loads(r.read().decode('utf-8'))
-    return items if isinstance(items, list) else []
 
+def download_images(items, out_dir, include_children=False):
+    """Download every item's main image to out_dir/<shortcode>.jpg.
 
-def filter_candidates(items, min_likes=50, min_dim=800):
-    out = []
+    Returns list of (shortcode, path) tuples in the order downloaded.
+    """
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    results = []
     for it in items:
-        if not isinstance(it, dict):
-            continue
-        if it.get('type', '').lower() not in ('image', 'photo', 'sidecar'):
-            continue
-        if (it.get('likesCount') or 0) < min_likes:
-            continue
-        w = it.get('dimensionsWidth') or it.get('width') or 0
-        h = it.get('dimensionsHeight') or it.get('height') or 0
-        if w and w < min_dim:
-            continue
-        if h and h < min_dim:
-            continue
-        if looks_promo(it.get('caption') or ''):
-            continue
-        out.append({
-            'url': it.get('url'),
-            'image_url': it.get('displayUrl') or it.get('imageUrl'),
-            'caption': (it.get('caption') or '')[:500],
-            'likes': it.get('likesCount') or 0,
-            'comments': it.get('commentsCount') or 0,
-            'width': w,
-            'height': h,
-            'owner': it.get('ownerUsername') or '',
-            'timestamp': it.get('timestamp') or '',
-            'hashtags': it.get('hashtags') or [],
-        })
-    out.sort(key=lambda x: -x['likes'])
-    return out
+        shortcode = it.get('shortcode') or 'unknown'
+        target = out / f'{shortcode}.jpg'
+        try:
+            req = urllib.request.Request(
+                it['image_url'], headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                target.write_bytes(r.read())
+            results.append((shortcode, str(target)))
+        except Exception as e:
+            print(f'  download FAIL [{shortcode}]: {e}', file=sys.stderr)
+        if include_children:
+            for i, child in enumerate(it.get('child_images', [])):
+                cpath = out / f'{shortcode}_c{i+1}.jpg'
+                try:
+                    req = urllib.request.Request(
+                        child, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req, timeout=60) as r:
+                        cpath.write_bytes(r.read())
+                    results.append((f'{shortcode}_c{i+1}', str(cpath)))
+                except Exception as e:
+                    print(f'  download FAIL [{shortcode}_c{i+1}]: {e}', file=sys.stderr)
+    return results
+
+
+def fetch_by_hashtag(hashtag, results_limit=30, timeout=240):
+    """LEGACY (v0.2): hashtag scraper. Kept for back-compat — not used by v0.3."""
+    token = _load_token()
+    hashtag = hashtag.lstrip('#')
+    payload = json.dumps({'hashtags': [hashtag], 'resultsLimit': results_limit}).encode('utf-8')
+    api = (
+        'https://api.apify.com/v2/acts/'
+        f'apify~instagram-hashtag-scraper/run-sync-get-dataset-items?token={token}'
+    )
+    req = urllib.request.Request(
+        api, data=payload, method='POST',
+        headers={'Content-Type': 'application/json'},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        raw = json.loads(r.read())
+    return [n for n in (_normalize(it) for it in raw) if n is not None]
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('keyword', help='Hashtag or keyword (Russian recommended)')
-    ap.add_argument('--limit', type=int, default=30)
-    ap.add_argument('--min-likes', type=int, default=50)
-    ap.add_argument('--min-dim', type=int, default=800)
+    ap.add_argument('urls', nargs='+', help='One or more Instagram post URLs')
+    ap.add_argument('--out', default='/tmp/dr-meir-visuals/raw.json')
+    ap.add_argument('--download-dir', default=None,
+                    help='If set, also download images here (mkdir -p as needed)')
+    ap.add_argument('--include-children', action='store_true')
     args = ap.parse_args()
 
-    items = run_hashtag_scraper(args.keyword, args.limit)
-    filtered = filter_candidates(items, args.min_likes, args.min_dim)
-    print(json.dumps(filtered, ensure_ascii=False, indent=2))
-    print(f'\n# {len(filtered)} candidates after filter (from {len(items)} raw)', file=sys.stderr)
+    items = fetch_posts(args.urls)
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding='utf-8')
+    print(f'fetched {len(items)} items -> {out_path}')
+
+    if args.download_dir:
+        results = download_images(items, args.download_dir, args.include_children)
+        print(f'downloaded {len(results)} images -> {args.download_dir}')
+        for sc, p in results:
+            print(f'  {sc} -> {p}')
 
 
 if __name__ == '__main__':

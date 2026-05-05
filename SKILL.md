@@ -1,280 +1,299 @@
 ---
 name: dr-meir-visuals
-description: AI visual enrichment pipeline for dr-meir.com pages. Extracts Hebrew keywords from a WordPress post, translates to Russian, scrapes Instagram via Apify for inspiration, filters images via vision analysis, then generates either (A) anatomical diagrams via nano-banana with Hebrew HTML overlay labels, (B) AI-transformed images via nano-banana edit, or (C) image-to-video transformations via Higgsfield, and injects the final visual into the page at the right semantic location with cache flush + IndexNow ping. Triggers — "enrich this page with AI visual", "create diagram for post X", "generate before/after video for X", "add visual to dr-meir post Y", "/dr-meir-visuals", or any request to add AI-generated images/videos to dr-meir.com posts.
+description: Visual + content enrichment pipeline for dr-meir.com pages. Input is a target post URL plus 1+ Instagram links the user picked manually (no keyword scraping). The skill (1) pulls each IG post via Apify URL mode to get image + caption, (2) cleans every image via Higgsfield nano_banana_2 — removes text/logos/watermarks, replaces the original background with a neutral studio gradient, mild enhancement, (3) generates at least one before→after transformation morph video via Higgsfield Kling 3.0, (4) uploads all media to WP and replaces galleries on the target post (the last gallery is replaced with the video widget by default), (5) mines the captions for facts, stats and mechanisms NOT yet on the page and injects them as a new science block + FAQ items + heading fixes, (6) clears cache and submits IndexNow. The user can override any step in plain language ("don't change the background", "skip the video", "place after the recovery section"). Triggers — "/dr-meir-visuals", "enrich post <url> with these IG links", "החלף גלריות בעמוד <url> עם התמונות מהקישורים הבאים", "עדכן את העמוד עם הלינקים <urls>".
 ---
 
-# dr-meir-visuals — AI Visual Enrichment for dr-meir.com
+# dr-meir-visuals — Manual-link Visual & Content Enrichment for dr-meir.com
 
-End-to-end pipeline for enriching dr-meir.com Hebrew medical/aesthetic pages with AI-generated visuals. Validated on post 17924 (abdominal liposuction) on 2026-05-04 — generated subcutaneous-vs-visceral fat anatomical diagram with Hebrew HTML overlay labels, injected at the right semantic location, all pages live and mobile-safe.
+End-to-end pipeline for enriching a dr-meir.com page with visuals AND text mined from Instagram posts that the **user picked manually**. No more keyword scraping or vision filtering — the user has already done the curation step.
+
+Validated end-to-end on post 52464 (knee liposuction) on 2026-05-05: 3 IG links → 3 cleaned images + 1 Kling 3.0 morph video + α/β-receptor science section + 4 new FAQs + heading fixes, all live.
 
 ## When to invoke
 
-- "Enrich post X with AI visual"
-- "Create a diagram for the abdominal page"
-- "Add anatomical illustration to chin liposuction post"
-- "Generate before/after video for thigh page" (path C, requires real patient photos)
-- "Add visual to https://dr-meir.com/liposuction/..."
-- "/dr-meir-visuals <post_id> <path>"
-- Any request that involves adding AI-generated images, diagrams, or videos to a dr-meir.com post
+- "Enrich `<post-url>` with these IG links: `<urls>`"
+- "Replace the galleries on `<post-url>` with these Instagram photos"
+- "תעדכן את העמוד `<url>` עם הקישורים האלה"
+- "/dr-meir-visuals `<post-url>` `<ig1>` `<ig2>` ..."
+- Any request that pairs a dr-meir.com page with one or more Instagram links
 
 ## When NOT to invoke
 
-- Generic "create an image" without a dr-meir.com target page
 - Pages outside dr-meir.com
-- Stock-photo lookups without AI transformation
-- Bulk image gallery uploads (use the WP admin)
+- Bulk gallery edits without source links
+- Stock-photo lookups (use a different workflow)
+- AI-generated diagrams from prompt only (use the legacy Path A in v0.2 — see archive)
 
 ---
 
-## The 3 visual paths
+## Inputs
 
-| Path | Output | When to use | Tools |
-|------|--------|-------------|-------|
-| **A — Diagram** | Static anatomical/explainer diagram with Hebrew HTML overlay labels | When the section explains a concept (anatomy, comparison, cause-effect) | nano-banana `generate_image` + custom HTML overlay |
-| **B — Transformed image** | AI-modified concept/lifestyle image (background swap, style transfer) | When the section needs a generic visual (clinic shot, mood, technology hero) | Apify Instagram → nano-banana `edit_image` |
-| **C — Image-to-video** | Short cinematic video (transformation, motion, parallax) | Before/after morphs, technology demos, hero animations | Real before/after images → Higgsfield `generate_video` |
+| Arg | Required | Format | Notes |
+|-----|----------|--------|-------|
+| `target` | yes | URL or post id | The page to enrich |
+| `instagram_links` | yes (1+) | `https://www.instagram.com/p/<shortcode>/` | User-curated |
+| `brief` | no | natural language | What the user wants the skill to do; defaults below if empty |
 
-**ETHICS RULE — Path C only with real authenticated patient photos.** Never use scraped before/after images for medical results — Israeli medical-board ethics violation. Path C is reserved for transformations where the source images are owned by Dr. Meir's clinic.
+### Default brief (when `brief` is empty)
+
+For each image, automatically:
+1. Remove all text overlays, logos, watermarks, branding
+2. Replace the original background with a clean, uniform neutral studio gradient
+3. Apply mild enhancement (sharpness, color balance) without changing anatomy/results
+
+Then **always** generate at least one before→after morph video using the first image (split into halves) — UNLESS the brief says "skip video".
+
+Then **always** mine the captions for content enrichment (facts, statistics, mechanisms) — UNLESS the brief says "skip text".
 
 ---
 
-## Pipeline — step by step
+## Pipeline
 
-### 1. Fetch & analyze the target page
+### 1. Resolve target post
 
 ```python
-# Use ~/.dr-meir/lib/wp_client.py
 from wp_client import get_post
+post_id = post_id_from_url_or_int(target)
 post = get_post(post_id)
+elementor_tree = json.loads(post['meta']['_elementor_data'])
 ```
 
-Extract:
-- `H1` → primary keyword
-- All `H2` → section topics
-- Rank Math `focus_keyword` (in `meta`)
-- All `<p>` text in body widgets → context
+Identify gallery widget IDs. They will be the replacement targets.
 
-### 2. Identify the injection point
+### 2. Fetch IG posts via Apify URL mode
 
-Walk the Elementor tree (`~/.dr-meir/lib/elementor_tree.py` or pattern in `inject_fat_diagram.py`). Find the text-editor widget whose `editor` field contains keywords matching the user's request topic.
-
-The visual will be inserted RIGHT AFTER that section's primary `</h2>` or `</ol>`.
-
-### 3. Decide the path
-
-If the user said "diagram" / "תרשים" / "infographic" / "illustration explaining" → **Path A**.
-If the user said "image" / "תמונה" / "concept photo" / "background" → **Path B**.
-If the user said "video" / "וידאו" / "before/after morph" / "transformation" → **Path C**.
-If unclear → ask the user.
-
-### 4. Path A — generate diagram (nano-banana, no scrape needed)
+`scripts/apify_instagram.py` (rewritten v0.3) calls `apify/instagram-scraper` with `directUrls=[...]` and `resultsType=posts`. Returns image URL, full caption, owner, likesCount, location.
 
 ```python
-# scripts/generate_diagram.py
-mcp__nano-banana__generate_image(prompt=clinical_diagram_prompt)
-# → /Users/meirbabaev/generated_imgs/generated-*.png
+from apify_instagram import fetch_posts
+items = fetch_posts(['https://www.instagram.com/p/B_Foa3ZlcQ3/', ...])
+# Each item: {shortcode, url, image_url, caption, owner, likes, ...}
 ```
 
-**Critical Hebrew-text caveat:** Gemini cannot render Hebrew correctly inside generated images. Always:
-1. Generate WITHOUT text labels (clean anatomy/concept only)
-2. Use `mcp__nano-banana__edit_image` with prompt "Remove ALL text labels…" if the first pass had any English text
-3. Add Hebrew labels via the HTML wrapper in `templates/diagram_overlay.py`
+Download every `image_url` to `/tmp/dr-meir-visuals/<run_id>/raw/<shortcode>.jpg`.
 
-The HTML overlay pattern (validated v3):
+### 3. Pre-flight NSFW guard (Higgsfield)
 
-```html
-<figure style="margin:2em auto;max-width:960px;background:#fafafa;border-radius:14px;padding:28px;box-shadow:0 2px 10px rgba(0,0,0,0.06);text-align:center">
-  <h3>{title_hebrew}</h3>
-  <div style="display:flex;justify-content:center;align-items:center;gap:24px;flex-wrap:wrap">
-    <div style="flex:1 1 380px;min-width:300px;max-width:540px">
-      <img src="{IMAGE_URL}" alt="{alt_text}" style="width:100%;border-radius:10px" loading="lazy" decoding="async" />
-    </div>
-    <div style="flex:1 1 260px;min-width:240px;max-width:340px;text-align:right">
-      <ol style="list-style:none;padding:0;margin:0">
-        {labeled_items}
-      </ol>
-    </div>
-  </div>
-  <figcaption>תרשים: ד"ר מאיר באבאיב — קליניקה לרפואת עור ואסתטיקה, תל אביב</figcaption>
-</figure>
-```
-
-Image proportion: ~60% width on desktop, stacks on mobile via `flex-wrap`. Image max-width 540px, label box max-width 340px. **This proportion was validated on 2026-05-04 — image looks dominant, labels readable.**
-
-### 5. Path B — Apify scrape + nano-banana edit
-
-**Search-language priority (validated 2026-05-04):**
-
-1. **English first** — `#kneeliposuction`, `#kneecontouring`, `#bbl`, `#liposuction` give the most results (30-50+ per tag) with the highest visual quality (US plastic surgeons, before/after with consistent style). Use as primary source.
-2. **Spanish second** — `#liposuccionrodillas`, `#cirugiaplastica` — large Spanish-speaking medical Instagram community (Mexico, Spain, Argentina, Colombia).
-3. **Russian last** — narrower hashtag taxonomy, often only 5-15 results per tag and many are off-topic. `#липосакцияколен` returned 5 results, mostly hairdressers.
+Higgsfield's nano_banana_2 rejects images whose top-frame contains buttocks, underwear close-ups, or genital area. **Pre-crop the image to mid-thigh-down whenever the IG photo is a full back/front body shot:**
 
 ```python
-# scripts/apify_instagram.py
-# Run apify/instagram-hashtag-scraper for translated keyword
-import urllib.request, json, os
-APIFY_TOKEN = os.environ['APIFY_API_TOKEN']
-url = f'https://api.apify.com/v2/acts/apify~instagram-hashtag-scraper/run-sync-get-dataset-items?token={APIFY_TOKEN}'
-payload = {'hashtags': [translated_kw], 'resultsLimit': 30}
-results = ...  # POST + parse JSON
+from PIL import Image
+im = Image.open(path)
+w, h = im.size
+# Heuristic: if aspect close to square AND user-described body view, crop top 25-30%
+crop = im.crop((0, int(h*0.28), w, int(h*0.88)))
+crop.save(path_cropped)
 ```
 
-Filter results:
-- Type=image only (skip video/carousel)
-- Engagement >= 50 likes
-- Image dimensions >= 800x800
-- Drop carousels with text overlays / ads
+Always confirm the upload status — if it returns `nsfw`, retry with a tighter crop or skip that image.
 
-Vision-score top 20 candidates by reading each image:
-- relevance to topic (0-10)
-- quality (0-10)
-- style fit for medical site (clinical/aesthetic vs lifestyle/inappropriate)
-- watermark/logo presence
-
-Top 3 → user selects one (option 2 — semi-auto). Then:
+### 4. Upload originals to Higgsfield + run nano_banana_2
 
 ```python
-mcp__nano-banana__edit_image(
-  imagePath=downloaded_path,
-  prompt='Heavy AI transformation: change background to clinical setting, '
-         'remove watermarks/logos, blur identifying features, '
-         'apply professional medical photography style.'
+from clean_image_higgsfield import clean_one
+clean_path = clean_one(
+    src_path,
+    prompt="...",         # default cleaning prompt — see templates/clean_default.txt
+    aspect_ratio="1:1",   # 1:1 for square IG, 16:9 if cropped landscape
+    resolution="2k",
 )
 ```
 
-Goal: transform deeply enough that reverse-image-search won't link to source.
+Default prompt template (`templates/clean_default.txt`):
 
-### 6. Path C — Higgsfield image-to-video
+> Edit this medical before/after photo:
+>   • COMPLETELY REMOVE every text overlay (Russian/English/Hebrew labels like "ДО", "ПОСЛЕ", BEFORE, AFTER), every logo and every watermark.
+>   • REPLACE the original background (clinic floor/wall/IV-stand/tile) with a clean uniform neutral light gray studio gradient.
+>   • Keep the patient anatomy, skin tone, pose and the visible BEFORE/AFTER fat-reduction difference EXACTLY as in the original — do NOT alter body shape, do NOT remove or add cellulite/fat.
+>   • Slightly enhance overall sharpness and contrast.
+>   • Final result: clean clinical before/after photograph on a neutral studio backdrop.
 
-**Only with user-owned before/after pair:**
+If the user's brief says "no background change" → drop the second bullet. If "no enhancement" → drop the fourth.
 
-```python
-# Upload both images
-mcp__claude_ai_higgsfield__media_upload(...)
-# Generate the transition
-mcp__claude_ai_higgsfield__generate_video(params={
-  'model': 'seedance_2_0',  # or 'kling3_0' for multi-shot
-  'prompt': 'Smooth medical-grade morph from before to after, professional clinical lighting',
-  'medias': [
-    {'value': before_uuid, 'role': 'start_image'},
-    {'value': after_uuid,  'role': 'end_image'}
-  ],
-  'duration': 4,
-  'aspect_ratio': '1:1',
-})
-# Poll until done
-mcp__claude_ai_higgsfield__job_status(jobId=...)
-```
+Poll `job_status` (sync=true ⇒ ~10-20s per image). Download `rawUrl` to `/tmp/dr-meir-visuals/<run>/clean/img<i>.png`.
 
-Embed as HTML5 video with poster image:
+### 5. Generate transformation video (Kling 3.0)
 
-```html
-<video controls preload="metadata" poster="{poster_url}" style="width:100%;max-width:680px;border-radius:10px">
-  <source src="{video_url}" type="video/mp4">
-</video>
-```
-
-### 7. Upload to WP media library
+Use the first cleaned image. Split it into BEFORE half (left) and AFTER half (right):
 
 ```python
-# scripts/wp_media.py — pattern from inject_fat_diagram.py:
-curl -u "$WP_USER:$WP_APP_PASSWORD" \
-  -X POST \
-  -H "Content-Disposition: attachment; filename=\"{slug}.png\"" \
-  -H "Content-Type: image/png" \
-  --data-binary @{file_path} \
-  "${WP_SITE}/wp-json/wp/v2/media"
+# scripts/generate_morph_video.py
+from PIL import Image
+im = Image.open(first_clean_path)
+w, h = im.size
+mid = w // 2
+left = im.crop((0, 0, mid - 8, h))
+right = im.crop((mid + 8, 0, w, h))
+# Pad each to square 1024x1024 with off-white bg matching the cleaned background
 ```
 
-Then PUT with Hebrew alt/title/caption.
+Upload both halves to Higgsfield → media_confirm. Call `generate_video` with model `kling3_0`, mode `pro`, duration 5, start_image=left, end_image=right.
 
-### 8. Inject into the post
+Default video prompt (`templates/morph_default.txt`):
 
-Find the target text-editor widget, insert the figure HTML right after the section's closing tag (h2/ol/p). Use the validated marker pattern:
+> Slow smooth medical transformation: the legs/area gradually become slimmer and more sculpted. Excess fat reduces, cellulite smooths, contour tightens. Pose and camera completely static. Soft clinical studio lighting. The end state shows clearly slimmer, contoured anatomy.
+
+Poll until terminal (~60-180s). Download mp4.
+
+If the user's brief says "skip video" → return early with image-only outputs.
+
+### 6. Upload to WP
+
+`scripts/wp_media.py` for each image and the mp4. Hebrew alt/title built from the post's H1 + a sequence number ("לפני ואחרי שאיבת שומן ב<אזור> — תוצאה אמיתית #1").
+
+### 7. Replace galleries on the target post
+
+Default plan when there are 3 image galleries on the page:
+- Galleries 1 + 2 → image batches of 3 (cycling the cleaned images)
+- Gallery 3 → **video widget** (autoplay, loop, mute, image_overlay = first cleaned image)
+
+If there are fewer galleries — skill fits the available slots and reports what was done.
+
+`scripts/replace_galleries_with_media.py` walks the Elementor tree, finds gallery widgets by `widgetType=='gallery'`, and either replaces `settings.gallery` with new image refs OR replaces the entire widget node with a `widgetType='video'` widget (preserving the original `id` so any custom CSS still binds).
+
+Pattern for the swap-to-video case (validated on 2026-05-05):
 
 ```python
-DIAGRAM_HTML = f'<!-- {MARKER} -->\n<figure>...</figure>\n'
+{
+  'id': original_gallery_id,
+  'elType': 'widget',
+  'widgetType': 'video',
+  'settings': {
+    'video_type': 'hosted',
+    'hosted_url': {'url': mp4_url, 'source': 'library'},
+    'autoplay': 'yes', 'loop': 'yes', 'mute': 'yes', 'play_on_mobile': 'yes',
+    'controls': '',
+    'image_overlay': {'id': poster_id, 'url': poster_url, 'size': 'full',
+                      'alt': '...', 'source': 'library'},
+    'show_image_overlay': 'yes',
+    'lazy_load': 'yes',
+    'aspect_ratio': '11',
+  },
+  'elements': [],
+}
 ```
 
-The MARKER lets you re-run safely (idempotent — replaces v1 with v2).
+### 8. Mine captions → enrichment text
+
+For each caption (Russian / English / Spanish / etc.) extract:
+
+| Signal | Example |
+|--------|---------|
+| Hard statistic | "46% women report localized fat resistant to diet" |
+| Mechanism | "Alpha-2 vs beta receptors", "post-pregnancy hormonal balance" |
+| Multi-area combo | "thighs + knees + calves + ankles same session" |
+| Recovery details | actual day-by-day timelines from the source |
+| Wrong-page-content guards | leftover "סנטר" / "בטן" headings on a knees page |
+
+Then compare against the existing post body. Skill produces:
+
+1. **A new text-editor widget** with a science section in Hebrew, ~400-700 words, using `<h2>`, `<ul>`, `<strong>` — placed just before the FAQ heading.
+2. **2-5 new FAQ tabs** appended to the existing toggle widget. Tab title = question, tab_content = `<p>...</p>` answer using new facts only.
+3. **Heading fixes**: any leftover keyword from a sister page is replaced (e.g. "דרגת סנטר" → "מבנה הברך") to fix template-clone rot.
+
+Deduplication rule: never inject a fact already present verbatim in the page body. Use Hebrew character n-gram match on H2 titles + first 100 chars of each existing text widget.
+
+Use a **Why:** + **How to apply:** structure for any patient-decision FAQ.
 
 ### 9. Push, clear cache, IndexNow
 
 ```python
-update_elementor(post_id, new_data, clear_css=True)
-clear_elementor_cache()
-submit_indexnow(url)
+update_elementor(post_id, json.dumps(tree, ensure_ascii=False), clear_css=True)
+clear_elementor_cache()  # MANDATORY — see memory: elementor-rest-edit-workflow
+submit_indexnow(post['link'])
 ```
 
 ### 10. Verify live
 
 ```python
-# Cache-bust + check marker present in rendered HTML
-fetch_live_html(url + '?cb=' + str(int(time.time())))
+url = post['link'] + '?cb=' + str(int(time.time()))
+html = fetch_live_html(url, mobile=False)
+assert all(slug in html for slug in expected_slugs)
+assert '<video' in html or 'video_widget_id' in html  # only if video step ran
+assert science_h2 in html
 ```
 
 ---
 
-## Tools available in this skill
+## Tools available
 
 | Tool | Purpose |
 |------|---------|
-| `mcp__nano-banana__generate_image` | Path A — diagrams from prompt |
-| `mcp__nano-banana__edit_image` | Path B — heavy transformation of source images |
-| `mcp__nano-banana__continue_editing` | Iterative refinement |
-| `mcp__claude_ai_higgsfield__models_explore` | Find right model for the job |
-| `mcp__claude_ai_higgsfield__generate_image` | Higher-end image gen (Soul, Sora, Flux) |
-| `mcp__claude_ai_higgsfield__generate_video` | Path C — image-to-video |
-| `mcp__claude_ai_higgsfield__media_upload` | Upload reference images |
-| `mcp__claude_ai_higgsfield__job_status` | Poll async jobs |
-| `mcp__claude_ai_higgsfield__balance` | Check Higgsfield credits |
-| Bash + Read | Apify scrape, WP REST, file management |
+| `mcp__claude_ai_higgsfield__media_upload` | Upload originals + morph halves |
+| `mcp__claude_ai_higgsfield__media_confirm` | Confirm upload (also surfaces NSFW rejections) |
+| `mcp__claude_ai_higgsfield__generate_image` | nano_banana_2 cleaning pass |
+| `mcp__claude_ai_higgsfield__generate_video` | kling3_0 / seedance_2_0 morph |
+| `mcp__claude_ai_higgsfield__job_status` | Poll (sync=true for short ones) |
+| `mcp__claude_ai_higgsfield__models_explore` | Re-discover models if Higgsfield rolls a new one |
+| `mcp__nano-banana__edit_image` | Local fallback if a Higgsfield job fails or NSFW persists |
+| Bash | Apify URL-mode scrape, curl PUTs, Pillow crop |
+| `wp_client.get_post` / `update_elementor` / `clear_elementor_cache` / `submit_indexnow` | Existing infra at `~/.dr-meir/lib/` |
+
+Apify keyword-hashtag scraping from v0.2 is **deprecated** in v0.3 — `scripts/apify_instagram.py` now uses `directUrls` mode only.
 
 ---
 
 ## Configuration
 
-Required environment variables in `~/.dr-meir/credentials.env`:
+`~/.dr-meir/credentials.env`:
 
 ```
 WP_SITE=https://dr-meir.com
 WP_USERNAME=<wp-user>
 WP_APP_PASSWORD=<app-pass>
-APIFY_API_TOKEN=<apify-token>
+APIFY_API_TOKEN=apify_api_...
 ```
 
-Higgsfield is connected via claude.ai Connectors (no API key needed in this skill — uses OAuth).
+Higgsfield is OAuth via claude.ai Connectors — no key in env.
 
 ---
 
-## Operating modes
+## NSFW handling cookbook
 
-User picks at the start of a run:
+Higgsfield's policy filter rejects:
+- Buttocks/glutes close-ups (regardless of clinical context)
+- Visible underwear or thongs
+- Front-of-pelvis close-ups
 
-1. **Auto** — pick top candidate, transform, inject, done. Fastest.
-2. **Semi-auto** ⭐ (recommended) — show top 3 transformed candidates, user picks one, inject. Default.
-3. **Interactive** — show top 20 raw candidates, user marks relevant ones, transform 3, pick 1.
+When a `media_confirm` returns `status: nsfw`:
 
-For Path C (video), always semi-auto minimum — preview before injection.
+1. **First fix**: re-crop the original image to remove the offending region (Pillow), upload again. Top 25-30% crop usually works for back-view shots.
+2. **Second fix**: fall back to `mcp__nano-banana__edit_image` (Gemini's policy is more permissive for medical content). Send the original image with the same cleaning prompt.
+3. **Last resort**: skip that image and proceed with the remaining set; report that 1 image was excluded.
 
 ---
 
-## Validated example (2026-05-04)
+## Caption-mining heuristics (Hebrew enrichment)
 
-**Target:** Post 17924 (abdominal liposuction)
-**Section:** "שומן תת-עורי" / "שומן ויסצרלי"
-**Path chosen:** A (diagram)
-**Result:** https://dr-meir.com/liposuction/abdominal-liposuction/
+When parsing a Russian/English/Spanish caption, only inject content that satisfies ALL three:
 
-Steps:
-1. Generated cross-section anatomy via nano-banana (no text labels — Gemini's Hebrew is broken)
-2. Built v3 HTML overlay with 4 colored Hebrew labels (subcutaneous yellow, muscle red, visceral orange, organs blue)
-3. Image at flex 1:1 380px-540px, labels at 240px-340px, ratio ~60:40
-4. Uploaded to WP media (id 52526)
-5. Injected after `</ol>` of the fat-types list
-6. Cleared cache, IndexNow submitted, verified live
+1. **Not already on the page** (string-search: facts, percentages, mechanisms)
+2. **Verifiable** (mechanism explained in standard endocrinology/derm literature, or framed as "studies suggest" without a fabricated specific citation; never invent a journal name + year + author tuple)
+3. **Useful for patient decision-making** (drives understanding of why the procedure exists, not promotional fluff)
 
-The "v3" iteration was the keeper after user feedback on v1 (image too small) and v2 (image on top, labels below). Final layout: image right, labels left (RTL = image on right, source order: image first), bigger image proportions.
+Always translate to clinical Hebrew. Avoid the source-clinic's name. Never carry over the source surgeon's branding.
+
+Default insertion point: just before the FAQ heading widget. Default new FAQ count: 2-5 tabs.
+
+If the page has leftover content from a template-clone (e.g. headings still saying "סנטר" on a knee page), fix those headings in the same patch.
+
+---
+
+## Brief grammar — what the user can override
+
+The skill parses the user's free-text brief for these intents:
+
+| User says... | Skill does |
+|--------------|-----------|
+| "skip video" / "בלי וידאו" | step 5 skipped |
+| "skip text" / "בלי טקסט" | step 8 skipped |
+| "don't change background" | drops bg-replacement bullet from cleaning prompt |
+| "make 2 videos" / "two transformation videos" | runs step 5 twice on different image pairs |
+| "place text after <heading>" / "אחרי הכותרת X" | overrides default insertion point |
+| "use only image N" | filters image set down to that one |
+| "video should be `<duration>`s" | passes through to Kling duration |
+
+Anything not parseable is treated as additional clinical context appended to the cleaning prompt.
 
 ---
 
@@ -282,32 +301,33 @@ The "v3" iteration was the keeper after user feedback on v1 (image too small) an
 
 ```
 ~/.claude/skills/dr-meir-visuals/
-├── SKILL.md                    # this file
-├── README.md                   # GitHub readme
+├── SKILL.md                                # this file (v0.3)
+├── README.md
+├── LICENSE
 ├── scripts/
-│   ├── orchestrate.py          # main pipeline runner
-│   ├── extract_keywords.py     # H1/H2/focus_keyword extraction
-│   ├── translate_he_ru.py      # Hebrew → Russian (Claude does it inline)
-│   ├── apify_instagram.py      # Apify scraper wrapper
-│   ├── vision_filter.py        # Image scoring via Read tool
-│   ├── path_a_diagram.py       # diagram generator
-│   ├── path_b_transform.py     # image transformer
-│   ├── path_c_video.py         # video generator (Higgsfield)
-│   ├── wp_media.py             # upload to WP
-│   └── inject_visual.py        # inject HTML into Elementor
+│   ├── orchestrate.py                      # v0.3 — IG-links pipeline
+│   ├── apify_instagram.py                  # rewritten — directUrls mode
+│   ├── extract_keywords.py                 # unchanged — used in step 8
+│   ├── clean_image_higgsfield.py           # NEW — wraps upload + nano_banana_2 + download
+│   ├── generate_morph_video.py             # NEW — split + Kling video
+│   ├── mine_captions.py                    # NEW — caption → enrichment plan
+│   ├── replace_galleries_with_media.py     # NEW — generic gallery/video swap
+│   ├── wp_media.py                         # unchanged
+│   └── inject_visual.py                    # unchanged — still used for figures + text blocks
 ├── templates/
-│   ├── diagram_overlay.html    # the v3 figure pattern
-│   ├── image_caption.html      # simple image caption
-│   └── video_embed.html        # HTML5 video embed
+│   ├── diagram_overlay.html                # Path-A legacy template
+│   ├── video_embed.html                    # video figure (manual mode)
+│   ├── clean_default.txt                   # default nano_banana_2 cleaning prompt
+│   └── morph_default.txt                   # default kling3_0 morph prompt
 └── examples/
-    └── post-17924-fat-diagram.md   # validated run notes
+    ├── post-17924-fat-diagram.md           # v0.1 run notes (anatomical diagram)
+    └── post-52464-knee-ig-pipeline.md      # v0.3 run notes (IG-link enrichment)
 ```
-
-Helper scripts re-use `~/.dr-meir/lib/wp_client.py` and `elementor_tree.py` (the existing infrastructure).
 
 ---
 
 ## Versioning
 
-- **v0.2** (2026-05-04, evening): Path B validated end-to-end on post 52464 (knee liposuction). Replaced 3 chin galleries (9 images total) with: 1 transformed Instagram image + 5 nano-banana fresh generations + 4 Higgsfield (`nano_banana_flash`) generations. Lessons added: English-first hashtag priority; nano-banana is faster than Higgsfield for static image generation but Higgsfield gives a fallback when nano-banana 503s under load; heavy AI transformation reliably strips branding/watermarks/text overlays from IG sources. SKILL.md updated.
-- **v0.1** (2026-05-04, morning): Initial — Path A validated end-to-end on post 17924 (abdominal). Path B/C scaffolded; ready to run when caller invokes.
+- **v0.3** (2026-05-05): IG-links input model. Removed keyword-scraping flow. Added cleaning + morph + caption-mining as the default automatic pipeline. Validated end-to-end on post 52464 (knee liposuction): 3 IG links → 3 cleaned images + 1 Kling 3.0 morph video + α/β-receptor science block + 4 new FAQs + 2 heading fixes, all live with IndexNow ping.
+- **v0.2** (2026-05-04, evening): Path B validated end-to-end on post 52464. English-first hashtag priority added. Higgsfield `nano_banana_flash` fallback for nano-banana 503s.
+- **v0.1** (2026-05-04, morning): Initial — Path A validated end-to-end on post 17924 (subcutaneous-vs-visceral fat diagram).

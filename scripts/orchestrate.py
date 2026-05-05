@@ -1,114 +1,135 @@
 #!/usr/bin/env python3
 """
-Orchestrator — runs the full dr-meir-visuals pipeline for a single post.
+orchestrate.py — v0.3 IG-links pipeline runner.
+
+This script is a **planner**: it validates inputs, sets up the working dir,
+and emits a structured plan listing the exact MCP/Bash steps Claude should
+execute. It does NOT call MCP tools itself.
 
 Usage:
-    python3 orchestrate.py <post_id> --path A|B|C [options]
+    python3 orchestrate.py <target> --ig URL1 [URL2 ...] [--brief "..."] \\
+                                    [--mode auto|semi|interactive] \\
+                                    [--skip-video] [--skip-text] \\
+                                    [--video-count N]
 
-Path A (diagram):
-    --topic-needle "שומן תת-עורי"   # locate target widget
-    --diagram-prompt "..."          # passed to nano-banana
-    --title "..."                   # Hebrew figure title
-    --labels labels.json            # array of {bg,accent,title_color,title,body,badge}
-    --slug-prefix abdominal-fat     # used for filename
+`<target>` is either a post id or a full dr-meir.com URL.
 
-Path B (image transform):
-    --keyword-ru "липосакция"       # Russian keyword for Apify
-    --topic-needle "..."
-    --transform-prompt "..."        # how to transform via nano-banana edit
-
-Path C (video, before/after):
-    --before-image /path/to/before.jpg
-    --after-image  /path/to/after.jpg
-    --duration 4
-    --topic-needle "..."
-
-Common options:
-    --mode auto|semi|interactive   # default semi
-    --dry-run
-
-This script doesn't call MCP tools directly (Claude does that). Instead it:
-    1. Validates inputs
-    2. Prepares the working directory
-    3. Prints structured next steps for Claude to execute
+The plan emitted lists, in order, the steps:
+  1. apify_instagram fetch + download
+  2. per-image NSFW guard (Pillow crop) + Higgsfield upload + nano_banana_2 edit
+  3. morph video preparation + Kling 3.0 generate (unless --skip-video)
+  4. WP media uploads
+  5. gallery + video widget swap (replace_galleries_with_media.py)
+  6. caption mining → enrichment plan (unless --skip-text)
+  7. push, clear cache, IndexNow, verify live
 """
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
 
+def parse_target(arg):
+    if arg.isdigit():
+        return int(arg), None
+    m = re.search(r'/[^/]+/([^/]+)/?$', arg)
+    if m:
+        return None, m.group(1)
+    return None, None
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('post_id', type=int)
-    ap.add_argument('--path', choices=['A', 'B', 'C'], required=True)
-    ap.add_argument('--topic-needle', help='Text to locate target widget')
-    ap.add_argument('--diagram-prompt', help='nano-banana prompt for path A')
-    ap.add_argument('--title', help='Hebrew figure title')
-    ap.add_argument('--labels', help='Path to labels JSON for path A')
-    ap.add_argument('--keyword-ru', help='Russian keyword for path B Apify search')
-    ap.add_argument('--transform-prompt', help='nano-banana edit prompt for path B')
-    ap.add_argument('--before-image', help='Path to before image (path C)')
-    ap.add_argument('--after-image', help='Path to after image (path C)')
-    ap.add_argument('--duration', type=int, default=4, help='Video seconds (path C)')
-    ap.add_argument('--slug-prefix', default='visual')
-    ap.add_argument('--mode', choices=['auto', 'semi', 'interactive'], default='semi')
-    ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('target', help='Post id or full URL on dr-meir.com')
+    ap.add_argument('--ig', nargs='+', required=True,
+                    help='One or more Instagram post URLs (manually curated)')
+    ap.add_argument('--brief', default='',
+                    help='Free-text intent. If empty, default cleaning + 1 video + caption mining.')
+    ap.add_argument('--mode', choices=['auto', 'semi', 'interactive'], default='auto')
+    ap.add_argument('--skip-video', action='store_true')
+    ap.add_argument('--skip-text', action='store_true')
+    ap.add_argument('--video-count', type=int, default=1)
+    ap.add_argument('--run-id', default=None)
     args = ap.parse_args()
 
-    workdir = Path.home() / '.dr-meir' / 'campaigns' / 'dr-meir-visuals' / f'post-{args.post_id}'
-    workdir.mkdir(parents=True, exist_ok=True)
+    if not args.ig or not all(u.startswith('http') for u in args.ig):
+        print('ERROR: at least one IG URL required', file=sys.stderr)
+        sys.exit(2)
+
+    post_id, slug = parse_target(args.target)
+    run_id = args.run_id or f'run-{__import__("time").strftime("%Y%m%d-%H%M%S")}'
+    work = Path('/tmp/dr-meir-visuals') / run_id
+    work.mkdir(parents=True, exist_ok=True)
 
     plan = {
-        'post_id': args.post_id,
-        'path': args.path,
+        'run_id': run_id,
+        'workdir': str(work),
+        'target': {'arg': args.target, 'post_id': post_id, 'slug': slug},
+        'instagram_links': args.ig,
+        'brief': args.brief,
         'mode': args.mode,
-        'workdir': str(workdir),
-        'next_steps': [],
+        'video_count': 0 if args.skip_video else max(args.video_count, 1),
+        'mine_text': not args.skip_text,
+        'steps': [
+            {
+                'id': '1-fetch',
+                'name': 'Fetch IG posts via Apify (URL mode)',
+                'cmd': [
+                    'python3', 'scripts/apify_instagram.py',
+                    *args.ig,
+                    '--out', str(work / 'raw.json'),
+                    '--download-dir', str(work / 'raw'),
+                ],
+            },
+            {
+                'id': '2-clean',
+                'name': 'For each image: NSFW pre-crop + Higgsfield nano_banana_2 edit',
+                'description':
+                    'Use Higgsfield MCP. Default cleaning prompt from '
+                    'templates/clean_default.txt. NSFW fallback: tighter Pillow crop '
+                    'or mcp__nano-banana__edit_image.',
+                'planner_helper': 'scripts/clean_image_higgsfield.py plan ...',
+                'output': str(work / 'clean'),
+            },
+            {
+                'id': '3-video',
+                'name': f'Generate {0 if args.skip_video else max(args.video_count, 1)} '
+                        'transformation morph video(s) via Higgsfield Kling 3.0',
+                'enabled': not args.skip_video,
+                'planner_helper': 'scripts/generate_morph_video.py prepare ...',
+                'output': str(work / 'video'),
+            },
+            {
+                'id': '4-upload',
+                'name': 'Upload all cleaned images + videos to WP media library',
+                'helper': 'scripts/wp_media.py',
+            },
+            {
+                'id': '5-galleries',
+                'name': 'Swap galleries on the target post (last gallery → video widget)',
+                'helper': 'scripts/replace_galleries_with_media.py',
+                'plan_file': str(work / 'gallery_plan.json'),
+            },
+            {
+                'id': '6-text',
+                'name': 'Mine captions → enrichment text + new FAQs',
+                'enabled': not args.skip_text,
+                'helper': 'scripts/mine_captions.py',
+                'mined_facts_file': str(work / 'mined_facts.json'),
+                'output_block': str(work / 'enrichment_block.html'),
+            },
+            {
+                'id': '7-push',
+                'name': 'update_elementor + clear_elementor_cache + submit_indexnow + verify live',
+                'helper': '~/.dr-meir/lib/wp_client.py',
+            },
+        ],
     }
 
-    if args.path == 'A':
-        plan['next_steps'] = [
-            f"1. Run extract_keywords.py {args.post_id} → save to {workdir}/keywords.json",
-            f"2. Build diagram prompt from H2 + topic-needle context",
-            f"3. Call mcp__nano-banana__generate_image (no Hebrew text in image)",
-            f"4. If text appeared, edit_image to strip ALL labels",
-            f"5. Build figure HTML from templates/diagram_overlay.html with labels",
-            f"6. Upload via wp_media.py → get media_id + source_url",
-            f"7. Call inject_visual.py with --marker {args.slug_prefix}_v1 --needle '{args.topic_needle}'",
-            f"8. Verify live with cache-bust",
-        ]
-    elif args.path == 'B':
-        plan['next_steps'] = [
-            f"1. extract_keywords.py {args.post_id}",
-            f"2. apify_instagram.py '{args.keyword_ru}' --limit 30 → {workdir}/candidates.json",
-            f"3. For top 20: download to {workdir}/inputs/, then Read each via vision",
-            f"4. Score each (relevance, quality, style, watermark)",
-            f"5. Show top 3 to user (semi-auto), get pick",
-            f"6. mcp__nano-banana__edit_image with heavy transformation prompt",
-            f"7. Upload to WP, inject, verify",
-        ]
-    elif args.path == 'C':
-        if not args.before_image or not args.after_image:
-            print('ERROR: path C requires --before-image and --after-image (real patient photos only)',
-                  file=sys.stderr)
-            sys.exit(2)
-        if not Path(args.before_image).exists() or not Path(args.after_image).exists():
-            print('ERROR: image file(s) not found', file=sys.stderr)
-            sys.exit(2)
-        plan['next_steps'] = [
-            f"1. Verify both images are owned by Dr. Meir's clinic (ETHICS).",
-            f"2. mcp__claude_ai_higgsfield__media_upload for both",
-            f"3. mcp__claude_ai_higgsfield__generate_video model=seedance_2_0 with start/end frames",
-            f"4. Poll job_status until terminal (~60-180s)",
-            f"5. Download mp4 to {workdir}/output.mp4",
-            f"6. Upload to WP media, also extract poster frame",
-            f"7. Build figure from templates/video_embed.html",
-            f"8. Inject + verify",
-        ]
-
-    plan_path = workdir / 'plan.json'
-    plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding='utf-8')
+    plan_path = work / 'plan.json'
+    plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2),
+                         encoding='utf-8')
     print(json.dumps(plan, ensure_ascii=False, indent=2))
     print(f'\n# Plan saved to {plan_path}', file=sys.stderr)
 

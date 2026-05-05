@@ -1,0 +1,11 @@
+Edit this medical before/after photo:
+- COMPLETELY REMOVE every text overlay (Russian/English/Hebrew labels like ДО, ПОСЛЕ, BEFORE, AFTER, brand names, dates), every logo and every watermark.
+- REPLACE the original background (clinic floor, wall, baseboard, IV stand, tile, paper sheet, etc.) with a clean uniform neutral light gray studio gradient.
+- KEEP THE PATIENT ANATOMY EXACTLY AS IS — same skin tone, same pose, same camera angle, same visible BEFORE/AFTER fat-reduction difference. Do NOT alter body shape. Do NOT remove or add cellulite, fat, or scars.
+- Slightly enhance overall sharpness and contrast.
+- Result: a clean clinical before/after photograph on a neutral studio backdrop.
+
+Override hints (only when the caller's brief asks for them):
+- "no background change"  -> drop the second bullet entirely
+- "no enhancement"        -> drop the fourth bullet
+- "keep watermarks"       -> drop the first bullet
