@@ -72,3 +72,24 @@ A new text-editor widget was inserted just before the FAQ heading:
 - Toggle tab count went from 5 → 9
 - Old chin gallery URLs gone (verified via grep on rendered HTML)
 - IndexNow ack: 1 URL submitted
+
+---
+
+## v0.4 update (2026-05-05 evening) — slider video replaces Kling morph
+
+After the v0.3 Kling 3.0 morph went live, the user reported it looked "weird" — the body subtly morphed during the reveal, breaking the clinical-comparison illusion. They asked for the Instagram-reel-style slider-wipe pattern instead (`https://www.instagram.com/reel/DX9eXdjg2uH/`).
+
+Built `scripts/build_slider_video.py` (PIL+ffmpeg), regenerated the video from the same `img1` source, and swapped the existing video widget on post 52464:
+
+| | v0.3 (Kling 3.0) | v0.4 (slider-wipe) |
+|---|---|---|
+| Tool | Higgsfield Kling 3.0, pro mode | PIL + ffmpeg, deterministic |
+| Duration | 5s | 4.5s (1.0 + 2.0 + 1.5) |
+| Pattern | Smooth motion morph | BEFORE → vertical slider sweeps right→centre → side-by-side hold |
+| Labels | None | לפני / אחרי, fade in over 0.4s |
+| Anatomy artifacts | Subtle morphing during reveal | None — geometric mask, anatomy stays pixel-perfect |
+| AI credit cost | 1 Kling pro video | 0 |
+| WP media id | 52549 (replaced) | **52551** (current) |
+| URL | knee-transformation-morph.mp4 (gone) | knee-before-after-slider.mp4 (live) |
+
+**Lesson learned (added to v0.4 SKILL.md):** AI video models trained on motion morphs cannot reproduce a clean geometric divider sweep. For clinical before/after comparisons, deterministic PIL+ffmpeg is the right tool. Kling/Seedance now sits behind a "morph" trigger word for the rare cases when an organic on-camera transformation is genuinely wanted.

@@ -2,7 +2,7 @@
 
 Visual + content enrichment pipeline for [dr-meir.com](https://dr-meir.com), a Hebrew-language WordPress site for Dr. Meir Babaev's dermatology + aesthetic-medicine clinic.
 
-A Claude Code Skill that takes a target post URL plus a handful of Instagram links — links you already curated by hand — and turns them into clean, brand-stripped images, a transformation morph video, and an enrichment text block + new FAQs mined from the post captions.
+A Claude Code Skill that takes a target post URL plus a handful of Instagram links — links you already curated by hand — and turns them into clean, brand-stripped images, a deterministic Instagram-reel-style **slider-wipe video** (BEFORE → wipe → side-by-side), and an enrichment text block + new FAQs mined from the post captions.
 
 ---
 
@@ -34,7 +34,7 @@ Or in plain English to Claude:
 The skill will:
 1. Fetch each IG post via Apify URL mode (image + full caption)
 2. NSFW pre-crop + upload to Higgsfield + run nano_banana_2 to remove text/logos and replace the background
-3. Generate one Kling 3.0 morph video from the first image (split into BEFORE/AFTER halves)
+3. Build one slider-wipe video from the first cleaned image — deterministic PIL+ffmpeg, 4.5s, three phases (BEFORE → wipe → side-by-side with bilingual labels)
 4. Upload all media to WP and replace the page's existing galleries (the last gallery becomes the video widget)
 5. Mine the captions and inject a science block + 2-5 new FAQs in Hebrew, with heading fixes for any leftover wrong-page keywords
 6. Cache flush + IndexNow + verify live
@@ -72,6 +72,8 @@ APIFY_API_TOKEN=apify_api_...
 
 Higgsfield is connected via claude.ai Connectors (OAuth, no API key in env).
 nano-banana (fallback path) reads `GEMINI_API_KEY` from environment.
+
+The slider-wipe video step uses `Pillow` (auto-installed) and `ffmpeg` (`brew install ffmpeg` on macOS, `apt-get install ffmpeg` on Debian/Ubuntu).
 
 ---
 
@@ -124,6 +126,7 @@ For purely synthetic before/after images (no patient sourced), use a different s
 
 ## Versioning
 
+- **v0.4** (2026-05-05, evening): Slider-wipe is now the default video pattern (`scripts/build_slider_video.py`, deterministic PIL+ffmpeg, 4.5s, 1080×1080). The Kling 3.0 organic morph from v0.3 is now an alternate path that fires only when the user asks for "organic morph" / "אורגני" / "Kling". Why: AI motion morphs can't reproduce a clean geometric divider sweep without wobble or anatomical drift, which is wrong for clinical comparisons. Slider validated on post 52464 (id 52551).
 - **v0.3** (2026-05-05): IG-link input model. No more keyword scraping. Default automatic cleaning + morph video + caption mining. Validated end-to-end on post 52464.
 - **v0.2** (2026-05-04, evening): Hashtag scraper + nano-banana edit pipeline. Validated on post 52464 (image-only).
 - **v0.1** (2026-05-04, morning): Initial — diagram-from-prompt path. Validated on post 17924.

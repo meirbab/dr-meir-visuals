@@ -1,13 +1,13 @@
 ---
 name: dr-meir-visuals
-description: Visual + content enrichment pipeline for dr-meir.com pages. Input is a target post URL plus 1+ Instagram links the user picked manually (no keyword scraping). The skill (1) pulls each IG post via Apify URL mode to get image + caption, (2) cleans every image via Higgsfield nano_banana_2 — removes text/logos/watermarks, replaces the original background with a neutral studio gradient, mild enhancement, (3) generates at least one before→after transformation morph video via Higgsfield Kling 3.0, (4) uploads all media to WP and replaces galleries on the target post (the last gallery is replaced with the video widget by default), (5) mines the captions for facts, stats and mechanisms NOT yet on the page and injects them as a new science block + FAQ items + heading fixes, (6) clears cache and submits IndexNow. The user can override any step in plain language ("don't change the background", "skip the video", "place after the recovery section"). Triggers — "/dr-meir-visuals", "enrich post <url> with these IG links", "החלף גלריות בעמוד <url> עם התמונות מהקישורים הבאים", "עדכן את העמוד עם הלינקים <urls>".
+description: Visual + content enrichment pipeline for dr-meir.com pages. Input is a target post URL plus 1+ Instagram links the user picked manually (no keyword scraping). The skill (1) pulls each IG post via Apify URL mode to get image + caption, (2) cleans every image via Higgsfield nano_banana_2 — removes text/logos/watermarks, replaces the original background with a neutral studio gradient, mild enhancement, (3) builds a deterministic Instagram-reel-style BEFORE/AFTER slider-wipe video with PIL + ffmpeg from the first cleaned image (BEFORE fills frame → vertical slider sweeps right→centre → side-by-side hold with bilingual labels), (4) uploads all media to WP and replaces galleries on the target post (the last gallery becomes the video widget by default), (5) mines the captions for facts, stats and mechanisms NOT yet on the page and injects them as a new science block + FAQ items + heading fixes, (6) clears cache and submits IndexNow. The user can override any step in plain language ("don't change the background", "skip the video", "use Kling morph instead of slider", "place after the recovery section"). Triggers — "/dr-meir-visuals", "enrich post <url> with these IG links", "החלף גלריות בעמוד <url> עם התמונות מהקישורים הבאים", "עדכן את העמוד עם הלינקים <urls>".
 ---
 
 # dr-meir-visuals — Manual-link Visual & Content Enrichment for dr-meir.com
 
 End-to-end pipeline for enriching a dr-meir.com page with visuals AND text mined from Instagram posts that the **user picked manually**. No more keyword scraping or vision filtering — the user has already done the curation step.
 
-Validated end-to-end on post 52464 (knee liposuction) on 2026-05-05: 3 IG links → 3 cleaned images + 1 Kling 3.0 morph video + α/β-receptor science section + 4 new FAQs + heading fixes, all live.
+Validated end-to-end on post 52464 (knee liposuction) on 2026-05-05: 3 IG links → 3 cleaned images + 1 PIL/ffmpeg slider-wipe video + α/β-receptor science section + 4 new FAQs + heading fixes, all live. The slider-wipe replaced the v0.3 Kling 3.0 morph attempt because organic AI motion morphs don't reproduce a clean geometric divider sweep — we now build the slider deterministically.
 
 ## When to invoke
 
@@ -41,7 +41,7 @@ For each image, automatically:
 2. Replace the original background with a clean, uniform neutral studio gradient
 3. Apply mild enhancement (sharpness, color balance) without changing anatomy/results
 
-Then **always** generate at least one before→after morph video using the first image (split into halves) — UNLESS the brief says "skip video".
+Then **always** build one Instagram-reel-style **slider-wipe** video from the first cleaned image (deterministic PIL+ffmpeg, 4.5s, 1080×1080) — UNLESS the brief says "skip video" or asks for an organic morph.
 
 Then **always** mine the captions for content enrichment (facts, statistics, mechanisms) — UNLESS the brief says "skip text".
 
@@ -112,28 +112,43 @@ If the user's brief says "no background change" → drop the second bullet. If "
 
 Poll `job_status` (sync=true ⇒ ~10-20s per image). Download `rawUrl` to `/tmp/dr-meir-visuals/<run>/clean/img<i>.png`.
 
-### 5. Generate transformation video (Kling 3.0)
+### 5. Generate transformation video — slider-wipe (default, deterministic)
 
-Use the first cleaned image. Split it into BEFORE half (left) and AFTER half (right):
+The default v0.4 pattern is an **Instagram-reel-style slider wipe**, built deterministically with `PIL + ffmpeg`. The first cleaned BEFORE|AFTER side-by-side image is sliced and animated:
 
-```python
-# scripts/generate_morph_video.py
-from PIL import Image
-im = Image.open(first_clean_path)
-w, h = im.size
-mid = w // 2
-left = im.crop((0, 0, mid - 8, h))
-right = im.crop((mid + 8, 0, w, h))
-# Pad each to square 1024x1024 with off-white bg matching the cleaned background
+| Phase | Duration | What is shown |
+|-------|----------|--------------|
+| A     | 1.0s     | Full BEFORE filling the canvas (slider off-screen right) |
+| B     | 2.0s     | Vertical white slider (with circular handle + chevrons) sweeps from right edge → centre, smoothstep easing, revealing AFTER on its right |
+| C     | 1.5s     | Hold side-by-side BEFORE \| AFTER. Bilingual labels ("לפני" / "אחרי" or "BEFORE" / "AFTER") fade in over 0.4s. |
+
+Total: 4.5s, 30fps, 1080×1080, H.264 + faststart.
+
+```bash
+python3 scripts/build_slider_video.py \
+    --src /tmp/run/clean/img1.png \
+    --out /tmp/run/transformation_slider.mp4 \
+    --labels he         # or en / none
 ```
 
-Upload both halves to Higgsfield → media_confirm. Call `generate_video` with model `kling3_0`, mode `pro`, duration 5, start_image=left, end_image=right.
+Or as a library:
 
-Default video prompt (`templates/morph_default.txt`):
+```python
+from build_slider_video import build
+build('/tmp/run/clean/img1.png', '/tmp/run/transformation_slider.mp4', labels='he')
+```
 
-> Slow smooth medical transformation: the legs/area gradually become slimmer and more sculpted. Excess fat reduces, cellulite smooths, contour tightens. Pose and camera completely static. Soft clinical studio lighting. The end state shows clearly slimmer, contoured anatomy.
+**Why deterministic instead of Kling/Seedance morph?** AI video models trained on motion morphs cannot reproduce a clean geometric divider sweep — the line wobbles and the body subtly morphs during the reveal, which is wrong for a clinical comparison. PIL+ffmpeg gives pixel-perfect control, zero AI credits, and the exact Instagram-reel pattern users find familiar.
 
-Poll until terminal (~60-180s). Download mp4.
+**Hebrew labels caveat:** PIL has no bidi shaping. The script reverses Hebrew strings before drawing so the visual order is correct.
+
+**Dependencies:** `Pillow` (always installed) and `ffmpeg` (`brew install ffmpeg` on macOS).
+
+### 5b. Alternate: organic Kling 3.0 morph (only if user asks)
+
+If the user explicitly wants an **organic morph** (e.g. "I don't want a slider, I want the body to slim down on camera"), fall back to `scripts/generate_morph_video.py` which prepares start/end frames for Higgsfield Kling 3.0 in `pro` mode, 5s. See `templates/morph_default.txt` for the prompt.
+
+Trigger words for this fallback: "organic morph", "אורגני", "morph the body", "Kling".
 
 If the user's brief says "skip video" → return early with image-only outputs.
 
@@ -306,28 +321,30 @@ Anything not parseable is treated as additional clinical context appended to the
 ├── LICENSE
 ├── scripts/
 │   ├── orchestrate.py                      # v0.3 — IG-links pipeline
-│   ├── apify_instagram.py                  # rewritten — directUrls mode
-│   ├── extract_keywords.py                 # unchanged — used in step 8
-│   ├── clean_image_higgsfield.py           # NEW — wraps upload + nano_banana_2 + download
-│   ├── generate_morph_video.py             # NEW — split + Kling video
-│   ├── mine_captions.py                    # NEW — caption → enrichment plan
-│   ├── replace_galleries_with_media.py     # NEW — generic gallery/video swap
-│   ├── wp_media.py                         # unchanged
-│   └── inject_visual.py                    # unchanged — still used for figures + text blocks
+│   ├── apify_instagram.py                  # directUrls mode
+│   ├── extract_keywords.py                 # used in step 8
+│   ├── clean_image_higgsfield.py           # upload + nano_banana_2 + download
+│   ├── build_slider_video.py               # v0.4 DEFAULT — PIL+ffmpeg slider-wipe video
+│   ├── generate_morph_video.py             # v0.3 alt — Kling 3.0 organic morph (only if asked)
+│   ├── mine_captions.py                    # caption → enrichment plan
+│   ├── replace_galleries_with_media.py     # generic gallery/video swap
+│   ├── wp_media.py                         # upload media to WP
+│   └── inject_visual.py                    # insert HTML block into Elementor
 ├── templates/
 │   ├── diagram_overlay.html                # Path-A legacy template
 │   ├── video_embed.html                    # video figure (manual mode)
 │   ├── clean_default.txt                   # default nano_banana_2 cleaning prompt
-│   └── morph_default.txt                   # default kling3_0 morph prompt
+│   └── morph_default.txt                   # default kling3_0 morph prompt (alt path)
 └── examples/
     ├── post-17924-fat-diagram.md           # v0.1 run notes (anatomical diagram)
-    └── post-52464-knee-ig-pipeline.md      # v0.3 run notes (IG-link enrichment)
+    └── post-52464-knee-ig-pipeline.md      # v0.3/v0.4 run notes (IG-link enrichment + slider)
 ```
 
 ---
 
 ## Versioning
 
+- **v0.4** (2026-05-05, evening): Slider-wipe video pattern is now the default. Added `scripts/build_slider_video.py` (PIL+ffmpeg) which produces the Instagram-reel-style three-phase wipe (BEFORE fills frame → vertical slider with circular handle sweeps right→centre with smoothstep easing → side-by-side hold with fading bilingual labels). The Kling 3.0 organic morph from v0.3 is now an alternate path (5b in SKILL.md) that fires only when the user asks for "organic morph" / "אורגני" / "Kling". Why: AI motion morphs can't reproduce a clean geometric divider sweep — the line wobbles and the body subtly morphs during the reveal, which is wrong for clinical comparison. Validated on post 52464 — replaced the previous Kling morph with a new slider-wipe mp4 (id 52551).
 - **v0.3** (2026-05-05): IG-links input model. Removed keyword-scraping flow. Added cleaning + morph + caption-mining as the default automatic pipeline. Validated end-to-end on post 52464 (knee liposuction): 3 IG links → 3 cleaned images + 1 Kling 3.0 morph video + α/β-receptor science block + 4 new FAQs + 2 heading fixes, all live with IndexNow ping.
 - **v0.2** (2026-05-04, evening): Path B validated end-to-end on post 52464. English-first hashtag priority added. Higgsfield `nano_banana_flash` fallback for nano-banana 503s.
 - **v0.1** (2026-05-04, morning): Initial — Path A validated end-to-end on post 17924 (subcutaneous-vs-visceral fat diagram).
