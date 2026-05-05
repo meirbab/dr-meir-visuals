@@ -1,6 +1,6 @@
 ---
 name: dr-meir-visuals
-description: Visual + content enrichment pipeline for dr-meir.com pages. Input is a target post URL plus 1+ Instagram links the user picked manually (no keyword scraping). The skill (1) pulls each IG post via Apify URL mode to get image + caption, (2) cleans every image via Higgsfield nano_banana_2 — removes text/logos/watermarks, replaces the original background with a neutral studio gradient, mild enhancement, (3) builds a deterministic Instagram-reel-style BEFORE/AFTER slider-wipe video with PIL + ffmpeg from the first cleaned image (BEFORE fills frame → vertical slider sweeps right→centre → side-by-side hold with bilingual labels), (4) uploads all media to WP and replaces galleries on the target post (the last gallery becomes the video widget by default), (5) mines the captions for facts, stats and mechanisms NOT yet on the page and injects them as a new science block + FAQ items + heading fixes, (6) clears cache and submits IndexNow. The user can override any step in plain language ("don't change the background", "skip the video", "use Kling morph instead of slider", "place after the recovery section"). Triggers — "/dr-meir-visuals", "enrich post <url> with these IG links", "החלף גלריות בעמוד <url> עם התמונות מהקישורים הבאים", "עדכן את העמוד עם הלינקים <urls>".
+description: Visual + content enrichment pipeline for dr-meir.com pages. Input is a target post URL plus 1+ Instagram links the user picked manually (no keyword scraping). The skill (1) pulls each IG post via Apify URL mode to get image + caption, (2) cleans every image via Higgsfield nano_banana_2 (with nano-banana fallback when Higgsfield rejects as NSFW) — removes text/logos/watermarks, replaces the original background with a neutral studio gradient, diversifies clothing/underwear across images while keeping anatomy identical, (3) builds a deterministic Instagram-reel-style BEFORE/AFTER slider-wipe video with PIL + ffmpeg from the first cleaned image (BEFORE fills frame → vertical slider sweeps right→centre → side-by-side hold with bilingual labels), (4) **ADDS the new media to the target post alongside any existing media (never replaces or deletes the originals unless the user explicitly says "החלף"/"replace")** — appends to galleries, inserts new image widgets, video widget and diagram below the existing image-row, (5) mines the captions for facts, stats and mechanisms NOT yet on the page and injects them as a new science block + FAQ items + heading fixes, (6) clears cache and submits IndexNow. The user can override any step in plain language ("don't change the background", "skip the video", "use Kling morph instead of slider", "place after the recovery section", "החלף את התמונות הקיימות"). Triggers — "/dr-meir-visuals", "enrich post <url> with these IG links", "הוסף תמונות לעמוד <url>", "עדכן את העמוד עם הלינקים <urls>".
 ---
 
 # dr-meir-visuals — Manual-link Visual & Content Enrichment for dr-meir.com
@@ -23,6 +23,48 @@ Validated end-to-end on post 52464 (knee liposuction) on 2026-05-05: 3 IG links 
 - Bulk gallery edits without source links
 - Stock-photo lookups (use a different workflow)
 - AI-generated diagrams from prompt only (use the legacy Path A in v0.2 — see archive)
+
+---
+
+## ⚠ Media safety rules — ADD, don't REPLACE (v0.5)
+
+**Hard rule (validated 2026-05-06):** When the user invokes this skill on a page that already has media, the **default behaviour is to ADD the new content, not replace existing media**. Never delete or overwrite an image widget, gallery item, video widget, or featured_media without an explicit instruction.
+
+Why this rule exists: on 2026-05-06 I overwrote the 3 original images on `inner-thigh-lipo` with new IG-derived images, and the user had to manually ask me to revert. Their feedback: "אסור למחוק את המדיה הקיימת" — never delete existing media. WP media library entries are also preserved — even when a widget reference changes, the underlying file stays.
+
+### Default behaviour cheat-sheet
+
+| Existing on the page... | Default action | Replace mode (only if user says so) |
+|---|---|---|
+| 3 image widgets | INSERT new image widgets BELOW the existing row, in a new sibling container | Swap each image widget's `settings.image` to the new media |
+| Existing gallery widget | INSERT a new gallery widget below it (different `id`) | Replace `settings.gallery` array |
+| Existing video widget | INSERT a new video widget below | Swap `hosted_url` |
+| `featured_media` set | LEAVE alone | Update only when user says "set as cover" |
+| FAQ accordion | APPEND new items (never remove existing) | Same |
+| WP media library entries | NEVER call DELETE on `wp/v2/media/<id>` | Same |
+
+### Trigger words for explicit REPLACE mode
+
+Only when the user uses one of these phrases should the skill switch from ADD to REPLACE:
+
+- "החלף את התמונות" / "החלף את הוידאו" / "החלף את הגלריה"
+- "replace the images" / "swap out the existing photos"
+- "remove the old gallery and put these instead"
+- "overwrite"
+
+If the trigger is ambiguous ("update the page with these IG links"), default to ADD and report both the original media (kept) and the new media (added) in the run summary so the user can ask for replacement explicitly.
+
+### What "ADD" means for each Elementor structure
+
+- **3-image-row template** (e.g. inner-thigh-lipo): Build a **new sibling container** below the existing `image-row` container, containing the 3 new image widgets. The original `e8b03eb / 3d5e130 / 3617743` widgets are untouched.
+- **Gallery template** (e.g. knee-liposuction): Build a **new gallery widget** alongside the existing one (or append items to it without dropping existing ones). Don't replace `settings.gallery` blindly.
+- **Bare post**: just inject after the last text-editor in the body container.
+- **Video widget**: always insert NEW (not swap), with a unique widget id.
+- **Diagram + science text**: always inject NEW, before the FAQ heading.
+
+### When restoration is needed
+
+If a previous session already replaced media (legacy v0.3/v0.4 runs), provide a `revert_post_<id>.py` script that restores the original `image.id` + `image.url` from the WP media library (looking up via REST `wp/v2/media/<id>` for the original featured-image filename in `/2024/05/` or wherever).
 
 ---
 
@@ -344,6 +386,7 @@ Anything not parseable is treated as additional clinical context appended to the
 
 ## Versioning
 
+- **v0.5** (2026-05-06): **ADD-not-REPLACE rule** added as a hard safety constraint. When the user invokes the skill on a page that already has media, default behaviour is now to INSERT new media alongside the originals (new sibling container with the new image widgets, new gallery widget alongside the existing one, NEW video widget — never reusing original widget IDs). Replacement only fires when the user explicitly says "החלף" / "replace" / "swap" / "overwrite". Why: 2026-05-06 the user invoked the skill on `inner-thigh-lipo`; I overwrote the 3 original page images with new IG-derived ones, and they had to manually ask for restoration with "אסור למחוק את המדיה הקיימת". Also added: nano-banana fallback path when Higgsfield rejects images as NSFW (validated on the 3 inner-thigh frames where Higgsfield rejected all 3 with NSFW/failed; nano-banana edit_image accepted them with the same prompts). Also added: explicit guidance to DIVERSIFY clothing/underwear across images while keeping anatomy identical (different bottoms/colors per image so the page doesn't look like the same shot reused).
 - **v0.4** (2026-05-05, evening): Slider-wipe video pattern is now the default. Added `scripts/build_slider_video.py` (PIL+ffmpeg) which produces the Instagram-reel-style three-phase wipe (BEFORE fills frame → vertical slider with circular handle sweeps right→centre with smoothstep easing → side-by-side hold with fading bilingual labels). The Kling 3.0 organic morph from v0.3 is now an alternate path (5b in SKILL.md) that fires only when the user asks for "organic morph" / "אורגני" / "Kling". Why: AI motion morphs can't reproduce a clean geometric divider sweep — the line wobbles and the body subtly morphs during the reveal, which is wrong for clinical comparison. Validated on post 52464 — replaced the previous Kling morph with a new slider-wipe mp4 (id 52551).
 - **v0.3** (2026-05-05): IG-links input model. Removed keyword-scraping flow. Added cleaning + morph + caption-mining as the default automatic pipeline. Validated end-to-end on post 52464 (knee liposuction): 3 IG links → 3 cleaned images + 1 Kling 3.0 morph video + α/β-receptor science block + 4 new FAQs + 2 heading fixes, all live with IndexNow ping.
 - **v0.2** (2026-05-04, evening): Path B validated end-to-end on post 52464. English-first hashtag priority added. Higgsfield `nano_banana_flash` fallback for nano-banana 503s.
