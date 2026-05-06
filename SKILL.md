@@ -1,6 +1,6 @@
 ---
 name: dr-meir-visuals
-description: Visual + content enrichment pipeline for dr-meir.com pages. Input is a target post URL plus 1+ Instagram links the user picked manually (no keyword scraping). The skill (1) pulls each IG post via Apify URL mode to get image + caption, (2) cleans every image via Higgsfield nano_banana_2 (with nano-banana fallback when Higgsfield rejects as NSFW) — removes text/logos/watermarks, replaces the original background with a neutral studio gradient, diversifies clothing/underwear across images while keeping anatomy identical, (3) builds a deterministic Instagram-reel-style BEFORE/AFTER slider-wipe video with PIL + ffmpeg from the first cleaned image (BEFORE fills frame → vertical slider sweeps right→centre → side-by-side hold with bilingual labels), (4) **ADDS the new media to the target post alongside any existing media (never replaces or deletes the originals unless the user explicitly says "החלף"/"replace")** — appends to galleries, inserts new image widgets, video widget and diagram below the existing image-row, (5) mines the captions for facts, stats and mechanisms NOT yet on the page and injects them as a new science block + FAQ items + heading fixes, (6) clears cache and submits IndexNow. The user can override any step in plain language ("don't change the background", "skip the video", "use Kling morph instead of slider", "place after the recovery section", "החלף את התמונות הקיימות"). Triggers — "/dr-meir-visuals", "enrich post <url> with these IG links", "הוסף תמונות לעמוד <url>", "עדכן את העמוד עם הלינקים <urls>".
+description: Visual + content enrichment pipeline for dr-meir.com pages. Input is a target post URL plus 1+ Instagram links the user picked manually (no keyword scraping). The skill (1) pulls each IG post via Apify URL mode to get image + caption, (2) cleans every image via Higgsfield nano_banana_2 (with nano-banana fallback when Higgsfield rejects as NSFW) — removes text/logos/watermarks, replaces the original background with a neutral studio gradient, diversifies clothing/underwear across images while keeping anatomy identical, PRESERVES the visible BEFORE/AFTER body-shape difference (don't equalize the halves), (3) builds a deterministic crossfade SLIDESHOW video (v0.7 default) from the cleaned BEFORE/AFTER images with PIL + ffmpeg — each image is held for ~2.5s then smoothly crossfaded into the next; alt patterns (slider-wipe, Kling morph) are available only on explicit user request, (4) **ADDS the new media to the target post alongside any existing media (never replaces or deletes the originals unless the user explicitly says "החלף"/"replace")** — appends to galleries, inserts new image widgets, video widget and diagram below the existing image-row, (5) mines the captions for facts, stats and mechanisms NOT yet on the page and injects them as a new science block + FAQ items + heading fixes, (6) clears cache and submits IndexNow. The user can override any step in plain language ("don't change the background", "skip the video", "use Kling morph instead of slider", "place after the recovery section", "החלף את התמונות הקיימות"). Triggers — "/dr-meir-visuals", "enrich post <url> with these IG links", "הוסף תמונות לעמוד <url>", "עדכן את העמוד עם הלינקים <urls>".
 ---
 
 # dr-meir-visuals — Manual-link Visual & Content Enrichment for dr-meir.com
@@ -154,9 +154,42 @@ If the user's brief says "no background change" → drop the second bullet. If "
 
 Poll `job_status` (sync=true ⇒ ~10-20s per image). Download `rawUrl` to `/tmp/dr-meir-visuals/<run>/clean/img<i>.png`.
 
-### 5. Generate transformation video — slider-wipe (default, deterministic)
+### 5. Generate transformation video — crossfade slideshow (v0.7 default)
 
-The default v0.4 pattern is an **Instagram-reel-style slider wipe**, built deterministically with `PIL + ffmpeg`. The first cleaned BEFORE|AFTER side-by-side image is sliced and animated:
+The default v0.7 pattern is a **crossfade slideshow** of the cleaned BEFORE|AFTER images, built deterministically with `PIL + ffmpeg`. Each cleaned image is itself a side-by-side BEFORE | AFTER comparison, so the slideshow simply plays them in sequence with gentle blends — no slider, no jump, no flicker.
+
+```bash
+python3 scripts/build_slideshow_video.py \
+    --srcs /tmp/run/clean/img1.png /tmp/run/clean/img2.png /tmp/run/clean/img3.png \
+    --out /tmp/run/slideshow.mp4 \
+    --hold 2.5 --crossfade 0.7 --loop-back
+```
+
+| Phase | Default | What is shown |
+|-------|---------|---------------|
+| Hold #N | 2.5s    | Image #N held still (each image is a clean BEFORE \| AFTER) |
+| Crossfade | 0.7s | Smooth blend from image #N → image #N+1 |
+| Loop-back | optional | If `--loop-back` set, last image crossfades back to the first for a seamless loop |
+
+For 3 source images with default timings: 3 × 2.5s + 3 × 0.7s = **9.6s**.
+
+**Why slideshow instead of slider-wipe (v0.4–v0.6 default)?** The slider-wipe approach (sweep, then crossfade to side-by-side) had a sync glitch at the seam where the frame appeared to jump between BEFORE and AFTER, breaking the illusion. Slideshow is simpler and proven: each image is itself the BEFORE/AFTER comparison, and the video just plays them in sequence.
+
+**Hebrew labels caveat:** Each cleaned source image already contains the BEFORE/AFTER content positioning, so labels live in the image (or in the surrounding HTML caption), not burned into the video. The slideshow has no overlay text by default.
+
+**Dependencies:** `Pillow` and `ffmpeg`.
+
+### 5b. Alternate: slider-wipe (v0.6 sweep+crossfade) — only if user explicitly asks
+
+If the user explicitly wants the slider-wipe pattern ("slider", "סליידר", "wipe"), use `scripts/build_slider_video.py` instead. It produces the W → 0 sweep + crossfade-to-side-by-side. **Known issue (v0.6):** at the seam between the slider sweep ending and the side-by-side composition starting, some viewers perceive a "jump" between BEFORE and AFTER. Default to the v0.7 slideshow unless the user insists on the slider.
+
+### 5c. Alternate: organic Kling 3.0 morph — only if user asks for "organic morph"
+
+The original v0.3 Kling 3.0 morph remains an alternate path for "I want the body to slim down on camera" requests. See `scripts/generate_morph_video.py`.
+
+### 5-old: slider-wipe (v0.4–v0.6 default) — DEPRECATED but documented for historical reference
+
+The default v0.4 pattern was an **Instagram-reel-style slider wipe**, built deterministically with `PIL + ffmpeg`. The first cleaned BEFORE|AFTER side-by-side image is sliced and animated:
 
 | Phase | Duration | What is shown |
 |-------|----------|--------------|
@@ -386,6 +419,7 @@ Anything not parseable is treated as additional clinical context appended to the
 
 ## Versioning
 
+- **v0.7** (2026-05-06, late evening): **Crossfade slideshow replaces slider as the default video pattern.** User feedback: "הסליידר לא מסונכרן נכון בווידאו. הוא קופץ למצב שאחרי בדיוק שנייה או שתיים. כשהסליידר מגיע לקראת הסוף, הוא מחליף בין מצב לפני למצב אחרי" (the slider isn't synchronized correctly — it jumps between BEFORE and AFTER near the end). The v0.6 slider had a perceptible seam between phase B (slider sweep) and phase C (crossfade to side-by-side) that read as a "jump" between BEFORE and AFTER. The new v0.7 default is a much simpler **crossfade slideshow**: each cleaned source image is itself a clean BEFORE | AFTER comparison; the video plays them in sequence with a `hold` (default 2.5s) followed by a `crossfade` blend (default 0.7s). For 3 images with default timings: 9.6s total. New script `scripts/build_slideshow_video.py`. The slider-wipe (`build_slider_video.py`) and Kling 3.0 morph (`generate_morph_video.py`) are still present as alternates for users who explicitly ask. Validated on inner-thigh-lipo (post 21747) — slideshow video uploaded as id 52867, replaced the v4 slider video.
 - **v0.6** (2026-05-06, evening): **Slider animation fixed**. The v0.4/v0.5 slider stopped at the centre (slider_x = W/2 in phase B + static side-by-side as phase C). User feedback: "הסליידר נתקע באמצע עם תמונה מטושטשת" (the slider got stuck mid-frame with a blurred image) and "הסליידר צריך לנוע עד הסוף, להראות בהתחלה את המצב לפני, לחשוף באמצעות הסליידר את כל המצב אחרי, ועד שהוא מגיע לסוף. אז הפריים משתנה ומציג זה לצד זה". New 4-phase structure (5.1s default): **A** hold full BEFORE (0.8s) → **B** slider sweeps from x=W to x=0, fully revealing AFTER (2.4s) → **C** crossfade from full AFTER to a true side-by-side composition (0.4s) → **D** hold side-by-side with bilingual labels (1.5s). The crossfade is genuine — it's not the slider stopping at centre, it's a smooth blend from "full AFTER" to "BEFORE | AFTER side-by-side", which then holds. Also added: when cleaning images via Higgsfield/nano-banana, the prompt MUST explicitly say "preserve the visible body-shape difference between BEFORE and AFTER halves — do NOT equalize/smooth the difference". Why: 2026-05-06 the cleaning step was averaging the two halves so the side-by-side looked identical between BEFORE and AFTER. The fix is a "PRESERVE THE DIFFERENCE EXACTLY" clause in the cleaning prompt template.
 - **v0.5** (2026-05-06): **ADD-not-REPLACE rule** added as a hard safety constraint. When the user invokes the skill on a page that already has media, default behaviour is now to INSERT new media alongside the originals (new sibling container with the new image widgets, new gallery widget alongside the existing one, NEW video widget — never reusing original widget IDs). Replacement only fires when the user explicitly says "החלף" / "replace" / "swap" / "overwrite". Why: 2026-05-06 the user invoked the skill on `inner-thigh-lipo`; I overwrote the 3 original page images with new IG-derived ones, and they had to manually ask for restoration with "אסור למחוק את המדיה הקיימת". Also added: nano-banana fallback path when Higgsfield rejects images as NSFW (validated on the 3 inner-thigh frames where Higgsfield rejected all 3 with NSFW/failed; nano-banana edit_image accepted them with the same prompts). Also added: explicit guidance to DIVERSIFY clothing/underwear across images while keeping anatomy identical (different bottoms/colors per image so the page doesn't look like the same shot reused).
 - **v0.4** (2026-05-05, evening): Slider-wipe video pattern is now the default. Added `scripts/build_slider_video.py` (PIL+ffmpeg) which produces the Instagram-reel-style three-phase wipe (BEFORE fills frame → vertical slider with circular handle sweeps right→centre with smoothstep easing → side-by-side hold with fading bilingual labels). The Kling 3.0 organic morph from v0.3 is now an alternate path (5b in SKILL.md) that fires only when the user asks for "organic morph" / "אורגני" / "Kling". Why: AI motion morphs can't reproduce a clean geometric divider sweep — the line wobbles and the body subtly morphs during the reveal, which is wrong for clinical comparison. Validated on post 52464 — replaced the previous Kling morph with a new slider-wipe mp4 (id 52551).
