@@ -101,9 +101,18 @@ def _stamp_label(rgba, text, cx, cy, alpha, font):
 
 
 def build(src_path, out_path, width=1080, height=1080, fps=30,
-          phase_a=1.0, phase_b=2.0, phase_c=1.5, labels='he',
-          frames_dir=None):
-    """Build the slider-wipe video. Returns the output mp4 path."""
+          phase_a=0.8, phase_b=2.4, phase_c=0.4, phase_d=1.5,
+          labels='he', frames_dir=None):
+    """Build the slider-wipe video — v0.6 (sweeps ALL the way, then transitions to side-by-side).
+
+    Phases:
+      A — full BEFORE held (slider off-screen at right)
+      B — slider sweeps from x=W all the way to x=0; reveals full AFTER
+      C — crossfade from full AFTER to a TRUE side-by-side composition (BEFORE | AFTER)
+      D — hold side-by-side, bilingual labels fade in
+
+    Total default 5.1s. Returns output mp4 path.
+    """
     src = Path(src_path)
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -121,40 +130,71 @@ def build(src_path, out_path, width=1080, height=1080, fps=30,
     before_half = img1.crop((0, 0, mid, H))
     after_half = img1.crop((mid, 0, W, H))
 
+    # Two full-frame versions (each half stretched/cropped to fill the canvas)
     before_full = _fit(before_half, width, height)
     after_full = _fit(after_half, width, height)
+
+    # Side-by-side composition: BEFORE half on left, AFTER half on right, each at 1/2 width
+    half_w = width // 2
+    sbs = Image.new('RGB', (width, height), (245, 245, 245))
+    sbs.paste(_fit(before_half, half_w, height), (0, 0))
+    sbs.paste(_fit(after_half, half_w, height), (half_w, 0))
 
     font_lbl = _find_font(54)
     left_text, right_text = _label_text(labels)
 
-    total = phase_a + phase_b + phase_c
+    total = phase_a + phase_b + phase_c + phase_d
     n_frames = int(total * fps)
 
     for i in range(n_frames):
         t = i / fps
+
         if t < phase_a:
-            slider_x = width
+            # --- A: hold BEFORE ---
+            base = before_full.copy()
             show_line = False
+            slider_x = width
+            sbs_alpha = 0.0
             label_alpha = 0
+
         elif t < phase_a + phase_b:
+            # --- B: sweep slider from W (right) all the way to 0 (left) ---
             progress = (t - phase_a) / phase_b
-            smooth = progress * progress * (3 - 2 * progress)  # smoothstep
-            slider_x = int(width - smooth * (width / 2))
-            show_line = True
+            smooth = progress * progress * (3 - 2 * progress)  # smoothstep [0,1]
+            slider_x = int(width - smooth * width)  # 0 at end
+            base = before_full.copy()
+            # LEFT of slider = AFTER (revealed); RIGHT of slider = BEFORE (still showing)
+            if slider_x > 0:
+                left_strip = after_full.crop((0, 0, slider_x, height))
+                base.paste(left_strip, (0, 0))
+            else:
+                base = after_full.copy()
+            # Hide the line when it reaches the very edge to avoid edge artifact
+            show_line = 0 < slider_x < width
+            sbs_alpha = 0.0
             label_alpha = 0
+
+        elif t < phase_a + phase_b + phase_c:
+            # --- C: crossfade full AFTER → side-by-side ---
+            progress = (t - phase_a - phase_b) / phase_c  # 0..1
+            sbs_alpha = progress
+            base = Image.blend(after_full, sbs, sbs_alpha)
+            show_line = False
+            slider_x = 0
+            label_alpha = int(progress * 255)
+
         else:
-            slider_x = width // 2
-            show_line = True
-            fade = min(1.0, (t - phase_a - phase_b) / 0.4)
-            label_alpha = int(fade * 255)
+            # --- D: hold side-by-side, labels fully visible ---
+            base = sbs.copy()
+            show_line = False
+            slider_x = 0
+            sbs_alpha = 1.0
+            label_alpha = 255
 
-        canvas = before_full.copy()
-        if slider_x < width:
-            right = after_full.crop((slider_x, 0, width, height))
-            canvas.paste(right, (slider_x, 0))
-        rgba = canvas.convert('RGBA')
+        rgba = base.convert('RGBA')
 
-        if show_line and 0 <= slider_x <= width:
+        # Slider line + handle (only during phase B and only when in canvas)
+        if show_line:
             d = ImageDraw.Draw(rgba)
             line_w = 5
             d.rectangle(
@@ -179,8 +219,11 @@ def build(src_path, out_path, width=1080, height=1080, fps=30,
                 fill=(120, 120, 120, 255),
             )
 
-        _stamp_label(rgba, left_text, width // 4, height - 80, label_alpha, font_lbl)
-        _stamp_label(rgba, right_text, 3 * width // 4, height - 80, label_alpha, font_lbl)
+        # Bilingual labels — only meaningful during D (and fading in during C)
+        # Position labels at the centers of each half
+        if label_alpha > 0:
+            _stamp_label(rgba, left_text, width // 4, height - 80, label_alpha, font_lbl)
+            _stamp_label(rgba, right_text, 3 * width // 4, height - 80, label_alpha, font_lbl)
 
         rgba.convert('RGB').save(frames_dir / f'f_{i:04d}.png')
 
@@ -210,9 +253,10 @@ def main():
     ap.add_argument('--width', type=int, default=1080)
     ap.add_argument('--height', type=int, default=1080)
     ap.add_argument('--fps', type=int, default=30)
-    ap.add_argument('--phase-a', type=float, default=1.0)
-    ap.add_argument('--phase-b', type=float, default=2.0)
-    ap.add_argument('--phase-c', type=float, default=1.5)
+    ap.add_argument('--phase-a', type=float, default=0.8, help='hold BEFORE')
+    ap.add_argument('--phase-b', type=float, default=2.4, help='slider sweep W -> 0 (full reveal)')
+    ap.add_argument('--phase-c', type=float, default=0.4, help='crossfade full AFTER -> side-by-side')
+    ap.add_argument('--phase-d', type=float, default=1.5, help='side-by-side hold with labels')
     ap.add_argument('--labels', choices=['he', 'en', 'none'], default='he')
     ap.add_argument('--frames-dir', default=None)
     args = ap.parse_args()
@@ -226,11 +270,12 @@ def main():
         phase_a=args.phase_a,
         phase_b=args.phase_b,
         phase_c=args.phase_c,
+        phase_d=args.phase_d,
         labels=args.labels,
         frames_dir=args.frames_dir,
     )
     size = Path(path).stat().st_size // 1024
-    duration = args.phase_a + args.phase_b + args.phase_c
+    duration = args.phase_a + args.phase_b + args.phase_c + args.phase_d
     print(f'{path}  ({size} KB, {duration}s @ {args.fps}fps)')
 
 

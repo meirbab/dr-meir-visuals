@@ -2,6 +2,7 @@ Edit this medical before/after photo:
 - COMPLETELY REMOVE every text overlay (Russian/English/Hebrew labels like ДО, ПОСЛЕ, BEFORE, AFTER, brand names, dates), every logo and every watermark.
 - REPLACE the original background (clinic floor, wall, baseboard, IV stand, tile, paper sheet, etc.) with a clean uniform neutral light gray studio gradient.
 - KEEP THE PATIENT ANATOMY EXACTLY AS IS — same skin tone, same pose, same camera angle, same visible BEFORE/AFTER fat-reduction difference. Do NOT alter body shape. Do NOT remove or add cellulite, fat, or scars.
+- CRITICAL: PRESERVE THE VISIBLE BODY-SHAPE DIFFERENCE BETWEEN THE TWO HALVES — the BEFORE half MUST stay clearly fuller/wider, the AFTER half MUST stay clearly slimmer/sculpted. DO NOT smooth out, average, or equalize the difference. This is a real medical comparison; the contrast between BEFORE and AFTER is the entire point of the image.
 - Slightly enhance overall sharpness and contrast.
 - Result: a clean clinical before/after photograph on a neutral studio backdrop.
 
